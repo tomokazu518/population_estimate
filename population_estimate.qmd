@@ -1,0 +1,562 @@
+---
+title: "将来人口の推計"
+author: "野村友和"
+figureTitle: "図"
+figPrefix: "図"
+tableTitle: "表"
+tblPrefix: "表"
+format: beamer
+fontsize: 8pt
+header-includes: |
+  \usetheme{metropolis}
+  \usepackage{zxjatype}
+  \usepackage[ipa]{zxjafont}
+  \setlength{\parskip}{1.5em}
+  \setlength{\parsep}{0.5em}
+  \renewcommand{\textbf}[1]{\alert{#1}}
+  \usepackage{hyperref}
+  \hypersetup{colorlinks,linkcolor=blue,urlcolor=blue,citecolor=blue}
+  \renewcommand{\href}[2]{\textcolor{blue}{\underline{#2}}}
+---
+
+```{r}
+library(tidyverse)
+library(estatapi)
+library(gt)
+library(patchwork)
+library(readxl)
+
+library(showtext)
+font_add("IPAexGothic", "/usr/share/fonts/opentype/ipafont/ipaexg.ttf")
+showtext_auto()
+
+```
+
+## はじめに
+
+内容と目標
+
+- 2015年と2020年の国勢調査および2020年の人口動態調査の結果を利用して，コーホーと変化率法により2025年以降の人口を推定する。  
+→人口の変化率や出生率が変わらないとすれば2025年以降の人口がどのようになるかをシミュレーションする。
+- 国勢調査など政府統計の入手方法を理解し，ExcelやRの使い方に慣れる。
+- 日本の人口構造の変化について，実際に統計を見ながら理解する。
+
+
+この演習の内容は
+
+- 御園謙吉・良永康平（編）『よくわかる統計学II　経済統計編』，2007年，ミネルヴァ書房，p48-59
+
+に基づくので，さらに詳しく知りたい方は参考にすること。
+
+## データの入手
+
+```{r}
+
+# e-statのappIDを設定
+appID = ""
+
+census_2015 <- estat_getStatsData(
+  appId= appID,
+  statsDataId = "0004019343",
+  cdCat02 = "0",
+  cdCat03 = c("1", "2"),
+  cdArea = "00000"
+)
+
+census_2020 <- estat_getStatsData(
+  appId= appID,
+  statsDataId = "0004019304",
+  cdCat02 = "0",
+  cdCat03 = c("1", "2"),
+  cdArea = "00000"
+)
+
+
+vital_2020 <- estat_getStatsData(
+  appId= appID,
+  statsDataId = "0003411630",
+  cdCat01 = "00100",
+  cdCat03 = "00100",
+  cdTime = "2020000000"
+) 
+
+```
+
+必要なデータは
+
+  1. 2015年の，男女別・年齢（5歳階級）別人口
+  2. 2020年の，男女別・年齢（5歳階級）別人口
+  3. 2020年の，母親の年齢（5歳階級）別出生数
+
+それぞれ，e-Statから入手することができる。
+
+  1. 令和2年国勢調査＞参考表：不詳補完結果＞平成27年国勢調査に関する不詳補完結果（遡及集計）＞表番号1-2　男女，年齢（5歳階級及び3区分），国籍総数か日本人別人口，平均年齢，年齢中位数及び人口構成比［年齢別］－全国，都道府県，21大都市，特別区，人口50万以上の市 (APIの場合は表1-2-1)  
+   [→e-stat](https://www.e-stat.go.jp/stat-search/files?page=1&layout=datalist&toukei=00200521&tstat=000001136464&cycle=0&tclass1=000001154387&tclass2=000001159627&tclass3val=0&metadata=1&data=1)
+  2. 令和2年国勢調査＞参考表：不詳補完結果＞令和２年国勢調査に関する不詳補完結果＞表番号1-2　男女，年齢（5歳階級及び3区分），国籍総数か日本人別人口，平均年齢，年齢中位数及び人口構成比［年齢別］－全国，都道府県，21大都市，特別区，人口50万以上の市 (APIの場合は表1-2-1)  
+   [→e-stat](https://www.e-stat.go.jp/stat-search/files?page=1&layout=datalist&toukei=00200521&tstat=000001136464&cycle=0&tclass1=000001154387&tclass2=000001159626&tclass3val=0&metadata=1&data=1)
+  3. 人口動態調査＞人口動態統計・確定数・出生・年次＞2020年　中巻　表番号4　出生数，性・出生順位・母の年齢（５歳階級）・出生月別  
+   [→e-stat](https://www.e-stat.go.jp/stat-search/files?page=1&layout=datalist&toukei=00450011&tstat=000001028897&cycle=7&year=20200&month=0&tclass1=000001053058&tclass2=000001053061&tclass3=000001053064&result_back=1&tclass4val=0)
+
+
+## データの整理
+
+```{r}
+
+library(forcats)
+
+census <- rbind(census_2015, census_2020) |>
+  filter(
+    (cat01_code %in% c(sprintf("%02d", 1:20), "R6"))
+  ) |>
+  mutate(
+    year = as.numeric(substr(time_code, 1, 4)),
+    sex = `男女`,
+    age = fct_inorder(
+      case_when(
+        `年齢` == "（再掲）100歳以上" ~ "100歳以上",
+        TRUE ~ `年齢`
+      )
+    )
+  ) |>
+  select(year, sex, age, value)
+
+census_wide <- census |>
+  pivot_wider(
+    names_from = c(sex, year),
+    values_from = value
+  ) 
+
+
+vital <- vital_2020 |>
+  filter(
+    cat02_code != "00100" & # 総数
+    cat02_code != "00450" & # 不詳
+    cat04_code != "00100"
+  ) |>
+  mutate(
+    sex = `性別`,
+    mother_age = case_when(
+      `母の年齢(5歳階級)` == "19歳以下" ~ "15～19歳",
+      `母の年齢(5歳階級)` == "45歳以上" ~ "45～49歳",
+      TRUE ~ `母の年齢(5歳階級)`
+    )
+  ) |>
+  select(mother_age, sex, value)
+
+vital_wide <- vital |>
+  pivot_wider(
+    names_from = sex,
+    names_glue = "出生数_{sex}",
+    values_from = value
+  )
+
+
+df <-left_join(census_wide, vital_wide, by = c("age" = "mother_age")) 
+
+```
+
+```{r}
+#| label: tab-census-data
+#| tbl-cap: "2015年・2020年国勢調査と2020年人口動態調査のデータ"
+
+gt(df) |>
+  fmt_number(
+    columns = where(is.numeric),
+    decimals = 0,
+    use_seps = TRUE
+  ) |>
+  sub_missing(
+    columns = everything(),
+    missing_text = ""
+  ) |>
+  tab_source_note(
+    source_note = "注：母親の年齢が14歳未満や50歳以上の出生は少数なので，それぞれ15歳〜19歳，45歳〜49歳に含めて計算する"
+  ) |>
+  tab_options(
+    table.font.size = px(7),
+    column_labels.font.size = px(7),
+    data_row.padding = px(2)
+  )
+
+```
+
+## 人口ピラミッドの作成
+
+人口構成の変化を視覚的に捉えるため，人口ピラミッドを作成[^1]。
+
+```{r}
+#| fig.width: 18
+#| fig.height: 8
+#| tbl-fig: "2015年・2020年の人口ピラミッド"
+
+pyramid <- function(df, y) {
+  pyramid <-
+  df |>
+  filter(year == y) |>
+  mutate(value = case_when(sex == "男" ~ -value / 1000, TRUE ~ value / 1000)) |>
+  ggplot(
+    aes( # x軸に年齢，y軸に人口をとり性別で塗り分け(縦横は入れ替える)
+      x = age,
+      y = value,
+      fill = `sex`
+    )
+  ) + 
+  geom_bar(stat = "identity", color = "black") +
+  scale_y_continuous(
+    breaks = seq(- 5000, 5000, 2500),
+    labels = abs(seq(- 5000, 5000, 2500))
+  ) +
+  labs(
+    title = paste0(y, "年"),
+    y = "人口(単位：1,000人)",
+    x = ""
+  ) +
+  coord_flip() + # グラフの回転 (縦軸と横軸の入替)
+  theme_classic(base_size = 20) +
+  theme(text = element_text(family = "IPAexGothic"))
+}
+
+pyramid_2015 <-pyramid(census, 2015)
+pyramid_2020 <-pyramid(census, 2020)
+
+plot(pyramid_2015 + pyramid_2020) 
+
+```
+
+[^1]: Excelで人口ピラミッドを作成する方法は，[統計WEB](https://bellcurve.jp/statistics/blog/15354.html)が参考になる。
+
+## 出生率の計算
+
+```{r}
+df <- df |>
+  mutate(
+    fertility_rate = (`出生数_男` + `出生数_女`) / `女_2020`
+  )
+
+total_fertility_rate <- sum(df$fertility_rate, na.rm = TRUE) * 5
+sex_ratio <- 
+  sum(df$`出生数_男`, na.rm = TRUE) /
+  sum(df$`出生数_女`, na.rm = TRUE)
+```
+
+- 母親の年齢階級別出生率(母親の年齢階級別出生数／当該年齢階級の女性の人口)を求める。
+- 15～49歳までの年齢別出生率を合計した値を**合計特殊出生率**という。
+  - 合計特殊出生率は一人の女性が産む子どもの数の平均を近似。
+  - 今回の例では，母親の年齢5歳階級別の出生率を用いて計算するので，年齢階級別の出生率を5倍したものを合計すれば合計特殊出生率が求められる。
+  - このデータから計算した2020年の合計特殊出生率: `r round(total_fertility_rate, 3)`
+- 生まれてくる子どもの性比(男／女の比率): `r round(sex_ratio, 3)`
+
+## コーホート変化率法
+
+同じ期間(この例では5年間)に生まれた人の集団を**コーホート**という。
+
+- 2015年に20～24歳のコーホートは，2020年には25～29歳 になっている。
+- このコーホートの2015～2020年における**コーホート変化率**を$C_{25}$と書くと  
+
+\begin{center}
+
+$C_{25} =$ 2020年の25～29歳人口÷2015年の20～24歳人口
+
+\end{center}
+
+このコーホート変化率が2020～2025年も変わらないとすれば，2025年にこのコーホートの人口 (2025年に25～29歳の人口)は，次のようになると予測できる[^2]。
+
+\begin{center}
+
+2020年の20～24歳人口×$C_{25}$
+
+\end{center}
+
+- 男女別にこの方法で2025年の5歳以上の年齢階級別人口を予測する。
+- 2030年以降についても同様の方法で予測できる。
+
+[^2]: 2020年の100歳以上の人は，2015年には95歳以上だから，$C_{100}$は2020年の100歳以上の人口を，2015年の95〜99歳の人口と100歳以上の人口との合計で割ったものとなる。また，2025年の100歳以上人口の予測は，2020年の95〜99歳の人口と100歳以上の人口との合計に$C_{100}$をかけたものとなる。
+
+```{r}
+
+df <- df |>
+  mutate(
+    cohort_change_male = case_when(
+      age == "100歳以上" ~ `男_2020` / (lag(`男_2015`) + `男_2015`),
+      TRUE ~ `男_2020` / lag(`男_2015`)
+    ),
+    cohort_change_female = case_when(
+      age == "100歳以上" ~ `女_2020` / (lag(`女_2015`) + `女_2015`),
+      TRUE ~ `女_2020` / lag(`女_2015`)
+    ),
+    `男_2025` = case_when(
+      age == "100歳以上" ~ 
+        round((lag(`男_2020`) + `男_2020`) * cohort_change_male),
+      TRUE ~ 
+        round(lag(`男_2020`) * cohort_change_male, 0)
+    ),
+    `女_2025` = case_when(
+      age == "100歳以上" ~
+        round((lag(`女_2020`) + `女_2020`) * cohort_change_female),
+      TRUE ~ round(lag(`女_2020`) * cohort_change_female, 0)
+    )
+  )
+
+```
+
+## 出生数の予測
+
+- 2020年における出生数や性比が2025年まで変わらないとすれば，2025年における0～4歳の男女のの人口はそれぞれ。次のようになると予測できる。
+
+\begin{center}
+
+(2020年の出生数×5)×男が生まれる割合\\
+(2020年の出生数×5)×女が生まれる割合
+
+\end{center}
+
+- 2030年以降については，母親の年齢階級別出生率(母親の年齢階級別出生数／当該年齢階級の女性人口)が一定であるとして，出生数を予測する。  
+→出生率が変化しなくても，女性の人口構成が変化によって出生数は変化する。
+
+```{r}
+
+df$男_2025[1] <- round(
+  sum(df$`出生数_男`, na.rm = TRUE) * 5
+  )
+df$女_2025[1] <- round(
+  sum(df$`出生数_女`, na.rm = TRUE) * 5
+  )
+
+```
+
+```{r}
+
+df <- df |>
+  mutate(
+    birth_male_2025 = round(
+      `女_2025` * fertility_rate * sex_ratio / (1 + sex_ratio)
+    ),
+    birth_female_2025 = round(
+      `女_2025` * fertility_rate * 1 / (1 + sex_ratio)
+    )
+  )
+
+df <- df |>
+  mutate(
+    `男_2030` = case_when(
+      age == "100歳以上" ~ 
+        round((lag(`男_2025`) + `男_2025`) * cohort_change_male),
+      TRUE ~ 
+        round(lag(`男_2025`) * cohort_change_male, 0)
+    ),
+    `女_2030` = case_when(
+      age == "100歳以上" ~
+        round((lag(`女_2025`) + `女_2025`) * cohort_change_female),
+      TRUE ~ round(lag(`女_2025`) * cohort_change_female, 0)
+    )
+  )
+
+df$男_2030[1] <- round(
+  sum(df$birth_male_2025, na.rm = TRUE) * 5
+)
+df$女_2030[1] <- round(
+  sum(df$birth_female_2025, na.rm = TRUE) * 5
+)
+
+```
+
+## Excelでの作業
+
+![2025年人口の予測](excel1.pdf)
+
+---
+
+![2030年人口の予測](excel2.pdf)
+
+
+## 将来人口を推定したら
+
+- 2025年，2030年の人口ピラミッドを作成しよう。
+- 人口減少や高齢化にかかわるさまざまな指標を計算してみよう。
+  - 高齢化率 (総人口に占める65歳以上人口の割合)
+  - 生産年齢人口比率 (総人口に占める15〜64歳人口の割合)
+  - 高齢者扶養比率 (65歳以上人口を生産年齢人口で割ったもの)
+- 合計特殊出生率が上昇した場合に将来人口の推定結果はどのように変わるか，シミュレーションしてみよう。
+- 少子高齢化によって，日本は今後どのような課題に直面するか，どのような対策が必要か考えてみよう。  
+  →参考：[「2050年までの経済社会の構造変化と政策課題について」](https://www.meti.go.jp/shingikai/sankoshin/2050_keizai/pdf/001_04_00.pdf)
+
+
+## 参考1：出生数および合計特殊出生率の長期時系列
+
+```{r}
+#| fig-cap: "出生数および合計特殊出生率の長期時系列"
+#| fig-width: 16
+#| fig-height: 9
+
+scientific_notation <- function(x) {
+  x <- format(x, scientific = TRUE)
+  x <- gsub("^(.*)e", "'\\1'e", x)
+  x <- gsub("e", "%*%10^", x)
+  x <- gsub("\\+", "", x)
+  parse(text = x)
+}
+
+# e-Statからデータ取得
+estat_vital <- estat_getStatsData(
+  appId = appID,
+  statsDataId = "0003411595", # 人口動態調査・人口動態統計・確定数・出生・4−1・上巻
+  cdCat01 = c("00100", "00150")
+) |>
+  mutate(
+    year = as.numeric(time_code) / 1000000,
+    name = `出生数・出生率・出生性比`
+  ) |>
+  select(year, name, value) |>
+  pivot_wider(names_from = name)
+
+# グラフ作成
+birth <- estat_vital |>
+  ggplot(
+    aes(
+      x = year,
+      y = `出生数_総数`
+    )
+  ) +
+  geom_bar(
+    stat = "identity",
+    color = "gray",
+    fill = "lightgray"
+  ) +
+  scale_y_continuous(
+    labels = scientific_notation,
+    limits = c(0, 3500000)
+  ) +
+  geom_text(
+    aes(
+      label = paste(
+        format(`出生数_総数`, big.mark = ","),
+        "\n (", year, ")",
+        sep = ""
+      )
+    ),
+    nudge_y = 50000,
+    color = "red",
+    size = 4,
+    data = subset(estat_vital, year %in% c(1949, 1966, 1989, 2005, 2023))
+  ) +
+  labs(
+    x = "",
+    y = "出生数"
+  )
+
+tfr <- estat_vital |>
+  ggplot(
+    aes(
+      x = year,
+      y = `合計特殊出生率`
+    )
+  ) +
+  geom_line(color = "gray") +
+  geom_point(
+    size = 1,
+    color = "blue"
+  ) +
+  ylim(0.5, 5) +
+  geom_text(
+    aes(
+      label = paste(`合計特殊出生率`, "\n (", year, ")", sep = "")
+    ),
+    nudge_y = -0.4,
+    color = "red",
+    size = 4,
+    data = subset(estat_vital, year %in% c(1947, 1966, 1989, 2005, 2023))
+  ) +
+  labs(
+    x = "年",
+    y = "合計特殊出生率"
+  )
+
+# patchworkパッケージを使ったプロット
+birth + tfr + plot_layout(ncol = 1)
+
+```
+
+## 参考2：人口ピラミッドの長期変化
+
+国立社会保障・人口問題研究所による推計
+```{r}
+#| fig-cap: "人口ピラミッドの長期変化"
+#| fig-width: 16
+#| fig-height: 9
+
+# 国立社会保障・人口問題研究所のホームページからデータをダウンロード
+download.file(
+  "https://www.ipss.go.jp/site-ad/TopPageData/pyramidDataPP2023J_11.xlsx",
+  destfile = "pyramidDataPP2023J_11.xlsx",
+  method = "curl"
+)
+
+# データの整理 年，年齢階級，性別，人口のlong形式に
+Male <- read_excel(
+  "pyramidDataPP2023J_11.xlsx",
+  sheet = "M", 
+  range = "B3:W110", 
+  col_names = T
+)
+
+Female <- read_excel(
+  "pyramidDataPP2023J_11.xlsx",
+  sheet = "F",
+  range = "B3:W110",
+  col_names = T
+)
+
+age <- c("total", 0:105)
+
+Male <- cbind(age, Male) |>
+  pivot_longer(- age, names_to = c("year")) |>
+  filter(age != "total") |>
+  mutate(
+    gender = "M",
+    age = as.numeric(age),
+    value = -value
+  )
+
+Female <- cbind(age, Female) |>
+  pivot_longer(- age, names_to = c("year")) |>
+  filter(age != "total") |>
+  mutate(
+    gender = "F",
+    age = as.numeric(age)
+  )
+
+population <- rbind(Male, Female)
+
+# 人口ピラミッドを作成する年を指定
+years <- c(1965, 1980, 1995, 2010, 2040, 2070)
+
+
+# 人口ピラミッドの描画
+for (i in years) {
+  fig <- population |>
+    filter(year == i) |>
+    ggplot(aes(x = age, y = value, fill = gender)) +
+    geom_bar(stat = "identity", color = "black", linewidth = 0.1) +
+    scale_x_continuous(n.breaks = 10) +
+    scale_y_continuous(
+      limits = c(-1250, 1250),
+      breaks = seq(-1000, 1000, 500),
+      labels = abs(seq(-1000, 1000, 500))
+    ) +
+    scale_fill_hue(
+      name = "",
+      labels = c("F" = "女", "M" = "男")
+    ) +
+    labs(title = i, y = "", x = "") +
+    coord_flip() +
+    theme(legend.position = "none")
+
+  if (i == years[1]) {
+    g <- fig
+  } else {
+    g <- g + fig
+  }
+}
+
+plot(g)
+```

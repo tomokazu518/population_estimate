@@ -47,3 +47,6 @@ po/*~
 
 # RStudio Connect folder
 rsconnect/
+
+*_files
+pyramidDataPP2023J_11.xlsx
